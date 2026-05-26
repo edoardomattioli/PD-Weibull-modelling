@@ -1,4 +1,4 @@
-import os
+import logging
 from pathlib import Path
 
 import numpy as np
@@ -8,7 +8,7 @@ from scipy.stats import weibull_min
 
 
 # =========================================================
-# CONFIGURATION
+# SETUP
 # =========================================================
 
 DATA_DIR = Path("data")
@@ -19,258 +19,165 @@ OUTPUT_DIR.mkdir(exist_ok=True)
 
 np.random.seed(42)
 
+logging.basicConfig(level=logging.INFO, format="%(levelname)s | %(message)s")
+
 
 # =========================================================
-# GENERATE SYNTHETIC BANKING DATA
+# RATING SCALE (GRANULAR CREDIT STRUCTURE)
 # =========================================================
 
-def generate_synthetic_data():
+RATINGS = [
+    "AAA", "AA", "A+", "A", "A-",
+    "BBB+", "BBB", "BBB-",
+    "BB+", "BB", "BB-",
+    "B", "CCC"
+]
 
-    n = 2000
 
-    # -----------------------------
-    # CUSTOMER MASTER DATABASE
-    # -----------------------------
+# =========================================================
+# WEIBULL PARAMETER MAP (DEFAULT INTENSITY STRUCTURE)
+# =========================================================
+
+WEIBULL_PARAM_MAP = {
+    "AAA":  (3.2, 140),
+    "AA":   (3.0, 130),
+    "A+":   (2.8, 115),
+    "A":    (2.6, 100),
+    "A-":   (2.4, 90),
+
+    "BBB+": (2.2, 80),
+    "BBB":  (2.0, 70),
+    "BBB-": (1.8, 60),
+
+    "BB+":  (1.6, 50),
+    "BB":   (1.5, 40),
+    "BB-":  (1.4, 35),
+
+    "B":    (1.3, 28),
+    "CCC":  (1.2, 18)
+}
+
+
+# =========================================================
+# SCENARIOS
+# =========================================================
+
+SCENARIO_ADJUSTMENT = {
+    "base": 1.0,
+    "adverse": 0.85,
+    "severe": 0.70
+}
+
+
+# =========================================================
+# SYNTHETIC DATA GENERATION (MULTI-SYSTEM BANK STRUCTURE)
+# =========================================================
+
+def generate_data():
+
+    n = 6000
+
     customers = pd.DataFrame({
         "customer_id": range(1, n + 1),
-        "segment": np.random.choice(
-            ["Corporate", "SME", "Retail"],
-            size=n,
-            p=[0.4, 0.35, 0.25]
-        ),
-        "region": np.random.choice(
-            ["North", "South", "West", "East"],
-            size=n
+        "segment": np.random.choice(["Corporate", "SME", "Retail"], n, p=[0.4, 0.35, 0.25]),
+        "region": np.random.choice(["North", "South", "East", "West"], n),
+        "industry": np.random.choice(
+            ["Manufacturing", "Energy", "Retail", "Tech", "RealEstate"], n
         )
     })
 
-    # -----------------------------
-    # CORE BANKING DATABASE
-    # -----------------------------
-    ratings = np.random.choice(
-        ["AAA", "A", "BBB", "BB"],
-        size=n,
-        p=[0.15, 0.35, 0.35, 0.15]
-    )
-
-    core_banking = pd.DataFrame({
+    core = pd.DataFrame({
         "loan_id": range(100000, 100000 + n),
         "customer_id": range(1, n + 1),
-        "rating": ratings,
-        "ead_core": np.random.gamma(
-            shape=5,
-            scale=50000,
-            size=n
-        ).round(2)
+        "rating": np.random.choice(RATINGS, n),
+        "ead_core": np.random.gamma(5, 50000, n).round(2),
+        "interest_rate": np.random.normal(4.5, 1.2, n).round(2),
+        "maturity_months": np.random.randint(12, 180, n)
     })
 
-    # -----------------------------
-    # RISK SYSTEM DATABASE
-    # Slightly different EAD values
-    # to simulate reconciliation
-    # -----------------------------
-    risk_system = pd.DataFrame({
-        "loan_id": core_banking["loan_id"],
-        "ead_risk": (
-            core_banking["ead_core"] *
-            np.random.normal(1, 0.02, size=n)
-        ).round(2)
+    risk = pd.DataFrame({
+        "loan_id": core["loan_id"],
+        "ead_risk": (core["ead_core"] * np.random.normal(1, 0.015, n)).round(2)
     })
 
-    # -----------------------------
-    # HISTORICAL DEFAULT DATABASE
-    # Weibull-driven generation
-    # -----------------------------
-    weibull_parameters = {
-        "AAA": (3.0, 120),
-        "A": (2.5, 90),
-        "BBB": (2.0, 60),
-        "BB": (1.5, 36)
-    }
+    defaults = []
 
-    default_times = []
-    default_flags = []
+    for r in core["rating"]:
 
-    for rating in ratings:
+        shape, scale = WEIBULL_PARAM_MAP[r]
 
-        shape, scale = weibull_parameters[rating]
+        t = weibull_min.rvs(shape, scale=scale)
 
-        simulated_time = weibull_min.rvs(
-            shape,
-            scale=scale
-        )
+        defaults.append({
+            "time_to_default": t if t <= 120 else np.nan,
+            "default_flag": 1 if t <= 120 else 0
+        })
 
-        # Simulate observation window
-        horizon = 120
+    defaults = pd.DataFrame(defaults)
+    defaults["loan_id"] = core["loan_id"]
 
-        if simulated_time <= horizon:
-            default_flags.append(1)
-            default_times.append(simulated_time)
-
-        else:
-            default_flags.append(0)
-            default_times.append(np.nan)
-
-    defaults = pd.DataFrame({
-        "loan_id": core_banking["loan_id"],
-        "default_flag": default_flags,
-        "time_to_default_months": default_times
-    })
-
-    # -----------------------------
-    # SAVE CSV FILES
-    # -----------------------------
-    customers.to_csv(
-        DATA_DIR / "customer_master.csv",
-        index=False
-    )
-
-    core_banking.to_csv(
-        DATA_DIR / "core_banking.csv",
-        index=False
-    )
-
-    risk_system.to_csv(
-        DATA_DIR / "risk_system.csv",
-        index=False
-    )
-
-    defaults.to_csv(
-        DATA_DIR / "historical_defaults.csv",
-        index=False
-    )
+    customers.to_csv(DATA_DIR / "customers.csv", index=False)
+    core.to_csv(DATA_DIR / "core.csv", index=False)
+    risk.to_csv(DATA_DIR / "risk.csv", index=False)
+    defaults.to_csv(DATA_DIR / "defaults.csv", index=False)
 
 
 # =========================================================
-# LOAD DATA
+# LOAD
 # =========================================================
 
-def load_data():
-
-    customer_master = pd.read_csv(
-        DATA_DIR / "customer_master.csv"
-    )
-
-    core_banking = pd.read_csv(
-        DATA_DIR / "core_banking.csv"
-    )
-
-    risk_system = pd.read_csv(
-        DATA_DIR / "risk_system.csv"
-    )
-
-    historical_defaults = pd.read_csv(
-        DATA_DIR / "historical_defaults.csv"
-    )
+def load():
 
     return (
-        customer_master,
-        core_banking,
-        risk_system,
-        historical_defaults
+        pd.read_csv(DATA_DIR / "customers.csv"),
+        pd.read_csv(DATA_DIR / "core.csv"),
+        pd.read_csv(DATA_DIR / "risk.csv"),
+        pd.read_csv(DATA_DIR / "defaults.csv")
     )
 
 
 # =========================================================
-# CLEAN DATA
+# CLEANING
 # =========================================================
 
-def clean_data(
-    customer_master,
-    core_banking,
-    risk_system,
-    historical_defaults
-):
-
-    customer_master = customer_master.drop_duplicates(
-        subset=["customer_id"]
-    )
-
-    core_banking = core_banking.drop_duplicates(
-        subset=["loan_id"]
-    )
-
-    risk_system = risk_system.drop_duplicates(
-        subset=["loan_id"]
-    )
-
-    historical_defaults = historical_defaults.drop_duplicates(
-        subset=["loan_id"]
-    )
+def clean(cust, core, risk, defl):
 
     return (
-        customer_master,
-        core_banking,
-        risk_system,
-        historical_defaults
+        cust.drop_duplicates("customer_id"),
+        core.drop_duplicates("loan_id"),
+        risk.drop_duplicates("loan_id"),
+        defl.drop_duplicates("loan_id")
     )
 
 
 # =========================================================
-# RECONCILIATION BETWEEN SYSTEMS
+# RECONCILIATION (CROSS-SYSTEM CONTROL)
 # =========================================================
 
-def reconcile_exposures(
-    core_banking,
-    risk_system
-):
+def reconcile(core, risk):
 
-    merged = core_banking.merge(
-        risk_system,
-        on="loan_id",
-        how="outer",
-        indicator=True
-    )
+    df = core.merge(risk, on="loan_id", how="outer")
 
-    merged["ead_difference"] = (
-        merged["ead_core"] -
-        merged["ead_risk"]
-    )
+    df["ead_diff"] = df["ead_core"] - df["ead_risk"]
+    df["ead_final"] = df["ead_risk"].fillna(df["ead_core"])
 
-    reconciliation_report = {
-        "matched_records":
-            int((merged["_merge"] == "both").sum()),
-
-        "core_only_records":
-            int((merged["_merge"] == "left_only").sum()),
-
-        "risk_only_records":
-            int((merged["_merge"] == "right_only").sum()),
-
-        "material_ead_differences":
-            int((merged["ead_difference"].abs() > 1000).sum())
+    report = {
+        "matched": int(df["ead_risk"].notna().sum()),
+        "missing_risk": int(df["ead_risk"].isna().sum()),
+        "material_diff": int((df["ead_diff"].abs() > 1000).sum())
     }
 
-    # Final reconciled exposure
-    merged["ead_final"] = (
-        merged["ead_risk"]
-        .combine_first(merged["ead_core"])
-    )
-
-    return merged, reconciliation_report
+    return df, report
 
 
 # =========================================================
-# INTEGRATE DATABASES
+# INTEGRATION LAYER
 # =========================================================
 
-def integrate_datasets(
-    customer_master,
-    reconciled_exposures,
-    historical_defaults
-):
+def integrate(customers, exposures, defaults):
 
-    df = reconciled_exposures.merge(
-        customer_master,
-        on="customer_id",
-        how="left"
-    )
-
-    df = df.merge(
-        historical_defaults,
-        on="loan_id",
-        how="left"
-    )
+    df = exposures.merge(customers, on="customer_id", how="left")
+    df = df.merge(defaults, on="loan_id", how="left")
 
     return df
 
@@ -281,228 +188,182 @@ def integrate_datasets(
 
 def quality_checks(df):
 
-    report = {
+    return {
         "rows": len(df),
-
-        "missing_customers":
-            int(df["customer_id"].isna().sum()),
-
-        "missing_ratings":
-            int(df["rating"].isna().sum()),
-
-        "missing_ead":
-            int(df["ead_final"].isna().sum()),
-
-        "duplicate_loans":
-            int(df["loan_id"].duplicated().sum())
+        "missing_rating": int(df["rating"].isna().sum()),
+        "missing_ead": int(df["ead_final"].isna().sum()),
+        "duplicates": int(df["loan_id"].duplicated().sum()),
+        "negative_ead": int((df["ead_final"] < 0).sum())
     }
 
-    return report
+
+# =========================================================
+# WEIBULL CALIBRATION (BY RATING)
+# =========================================================
+
+def calibrate(df):
+
+    params = {}
+
+    for r in RATINGS:
+
+        series = df[
+            (df["rating"] == r) &
+            (df["default_flag"] == 1)
+        ]["time_to_default"].dropna()
+
+        if len(series) < 10:
+            continue
+
+        shape, loc, scale = weibull_min.fit(series, floc=0)
+
+        params[r] = {
+            "shape": shape,
+            "scale": scale,
+            "n_obs": len(series)
+        }
+
+    return params
 
 
 # =========================================================
-# AGGREGATED PORTFOLIO ANALYSIS
+# PD ENGINE (LIFETIME CURVES)
 # =========================================================
 
-def aggregate_portfolio(df):
-
-    agg = (
-        df.groupby(["rating", "segment"])
-        .agg(
-            total_ead=("ead_final", "sum"),
-            avg_ead=("ead_final", "mean"),
-            default_rate=("default_flag", "mean"),
-            n_loans=("loan_id", "count")
-        )
-        .reset_index()
-    )
-
-    return agg
-
-
-# =========================================================
-# WEIBULL PD CURVE ESTIMATION
-# =========================================================
-
-def estimate_pd_curves(df):
-
-    results = {}
+def pd_engine():
 
     horizon = np.arange(1, 121)
 
-    plt.figure(figsize=(10, 6))
+    curves = {}
 
-    for rating in sorted(df["rating"].dropna().unique()):
+    for r in RATINGS:
 
-        subset = df[
-            (df["rating"] == rating) &
-            (df["default_flag"] == 1)
-        ]
+        shape, scale = WEIBULL_PARAM_MAP[r]
 
-        defaults = subset[
-            "time_to_default_months"
-        ].dropna()
-
-        if len(defaults) < 5:
-            continue
-
-        # Weibull fit
-        shape, loc, scale = weibull_min.fit(
-            defaults,
-            floc=0
-        )
-
-        results[rating] = {
-            "shape": shape,
-            "scale": scale
-        }
-
-        # Cumulative PD curve
-        pd_curve = weibull_min.cdf(
+        curves[r] = weibull_min.cdf(
             horizon,
             shape,
             loc=0,
             scale=scale
         )
 
-        plt.plot(
-            horizon,
-            pd_curve,
-            label=rating
-        )
-
-    plt.title(
-        "Forward Probability of Default Curves"
-    )
-
-    plt.xlabel("Months")
-    plt.ylabel("Cumulative PD")
-
-    plt.grid(True)
-
-    plt.legend()
-
-    plt.tight_layout()
-
-    plt.savefig(
-        OUTPUT_DIR / "pd_curves.png",
-        dpi=150
-    )
-
-    plt.close()
-
-    return results
+    return horizon, curves
 
 
 # =========================================================
-# MAIN EXECUTION
+# SCENARIO PROJECTION
+# =========================================================
+
+def scenario_projection():
+
+    horizon = np.arange(1, 121)
+
+    outputs = {}
+
+    for scen, adj in SCENARIO_ADJUSTMENT.items():
+
+        scen_curves = {}
+
+        for r in RATINGS:
+
+            shape, scale = WEIBULL_PARAM_MAP[r]
+
+            scen_curves[r] = weibull_min.cdf(
+                horizon,
+                shape,
+                loc=0,
+                scale=scale * adj
+            )
+
+        outputs[scen] = scen_curves
+
+    return horizon, outputs
+
+
+# =========================================================
+# PORTFOLIO AGGREGATION
+# =========================================================
+
+def aggregate(df):
+
+    return (
+        df.groupby(["rating", "segment"])
+        .agg(
+            ead=("ead_final", "sum"),
+            avg_ead=("ead_final", "mean"),
+            default_rate=("default_flag", "mean"),
+            n=("loan_id", "count")
+        )
+        .reset_index()
+    )
+
+
+# =========================================================
+# MAIN
 # =========================================================
 
 def main():
 
-    # Generate sample data only once
-    if not (
-        DATA_DIR / "customer_master.csv"
-    ).exists():
+    logging.info("pipeline start")
 
-        generate_synthetic_data()
+    if not (DATA_DIR / "customers.csv").exists():
+        generate_data()
 
-    (
-        customer_master,
-        core_banking,
-        risk_system,
-        historical_defaults
-    ) = load_data()
+    cust, core, risk, defl = load()
 
-    (
-        customer_master,
-        core_banking,
-        risk_system,
-        historical_defaults
-    ) = clean_data(
-        customer_master,
-        core_banking,
-        risk_system,
-        historical_defaults
-    )
+    cust, core, risk, defl = clean(cust, core, risk, defl)
 
-    reconciled_exp, recon_report = reconcile_exposures(
-        core_banking,
-        risk_system
-    )
+    exposures, recon = reconcile(core, risk)
 
-    integrated_df = integrate_datasets(
-        customer_master,
-        reconciled_exp,
-        historical_defaults
-    )
+    df = integrate(cust, exposures, defl)
 
-    qc_report = quality_checks(
-        integrated_df
-    )
+    qc = quality_checks(df)
 
-    portfolio_agg = aggregate_portfolio(
-        integrated_df
-    )
+    calib = calibrate(df)
 
-    pd_results = estimate_pd_curves(
-        integrated_df
-    )
+    horizon, base_curves = pd_engine()
+
+    _, scen_curves = scenario_projection()
+
+    agg = aggregate(df)
 
     # =====================================================
-    # SAVE OUTPUTS
+    # OUTPUTS
     # =====================================================
 
-    integrated_df.to_csv(
-        OUTPUT_DIR / "integrated_dataset.csv",
-        index=False
-    )
-
-    portfolio_agg.to_csv(
-        OUTPUT_DIR / "portfolio_aggregation.csv",
-        index=False
-    )
+    pd.DataFrame([recon]).to_csv(OUTPUT_DIR / "recon.csv", index=False)
+    pd.DataFrame([qc]).to_csv(OUTPUT_DIR / "qc.csv", index=False)
+    agg.to_csv(OUTPUT_DIR / "portfolio.csv", index=False)
 
     # =====================================================
-    # PRINT REPORTS
+    # PLOT SCENARIOS
     # =====================================================
 
-    print("\n==============================")
-    print("RECONCILIATION REPORT")
-    print("==============================")
+    for scen, curves in scen_curves.items():
 
-    for k, v in recon_report.items():
-        print(f"{k}: {v}")
+        plt.figure(figsize=(10, 6))
 
-    print("\n==============================")
-    print("QUALITY CHECKS")
-    print("==============================")
+        for r in RATINGS:
+            plt.plot(horizon, curves[r], alpha=0.6)
 
-    for k, v in qc_report.items():
-        print(f"{k}: {v}")
+        plt.title(f"Lifetime PD curves - {scen}")
+        plt.xlabel("Months")
+        plt.ylabel("Cumulative PD")
+        plt.grid(True)
 
-    print("\n==============================")
-    print("PORTFOLIO AGGREGATION")
-    print("==============================")
+        plt.tight_layout()
+        plt.savefig(OUTPUT_DIR / f"pd_{scen}.png")
+        plt.close()
 
-    print(
-        portfolio_agg.head(10)
-        .to_string(index=False)
-    )
+    # =====================================================
+    # SUMMARY OUTPUT
+    # =====================================================
 
-    print("\n==============================")
-    print("WEIBULL PARAMETERS")
-    print("==============================")
+    logging.info("run completed")
 
-    for rating, values in pd_results.items():
-
-        print(
-            f"{rating} | "
-            f"shape={values['shape']:.2f} | "
-            f"scale={values['scale']:.2f}"
-        )
-
-    print("\nOutputs saved in output/ folder.")
+    print(recon)
+    print(qc)
+    print(agg.head())
 
 
 if __name__ == "__main__":
